@@ -112,6 +112,12 @@ int main(void)
   MX_USB_OTG_FS_USB_Init();
   MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
+  //BSP_TSENSOR_Init();
+  BSP_HSENSOR_Init(); //HTS221
+  BSP_MAGNETO_Init(); //LIS3MDL
+  //BSP_ACCELERO_Init();
+  BSP_GYRO_Init(); //LSM6DSL
+  BSP_PSENSOR_Init(); //LPS22HB
 
   /* USER CODE END 2 */
 
@@ -122,6 +128,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+		float humidity = BSP_HSENSOR_ReadHumidity();
+		int16_t magnet[3];
+		BSP_MAGNETO_GetXYZ(magnet);
+		float gyro[3];
+		BSP_GYRO_GetXYZ(gyro);
+		float pressure = BSP_PSENSOR_ReadPressure();
+		printf("humidity: %f\n", humidity);
+		printf("pressure: %f\n", pressure);
+		printf("magnetometer -> x: %d, y: %d, z: %d\n", magnet[0], magnet[1], magnet[2]);
+		printf("gyroscope -> x: %f, y: %f, z: %f\n", gyro[0], gyro[1], gyro[2]);
   }
   /* USER CODE END 3 */
 }
@@ -652,7 +668,15 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+int _write(int file, char *ptr, int len)
+{
+    // Send each character via ITM
+    for (int i = 0; i < len; i++)
+    {
+        ITM_SendChar(*ptr++);
+    }
+    return len;
+}
 /* USER CODE END 4 */
 
 /**
