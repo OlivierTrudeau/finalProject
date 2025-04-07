@@ -36,7 +36,14 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-
+// Kalman filter state structure
+struct kalman_state {
+    float q; // Process noise covariance
+    float r; // Measurement noise covariance
+    float x; // State estimate
+    float p; // Estimate error covariance
+    float k; // Kalman gain
+};
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/

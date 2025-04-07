@@ -24,6 +24,7 @@
 #include <math.h>
 #define ARM_MATH_CM4
 #include <stdio.h>
+#include <stdbool.h>
 #include "stm32l4s5i_iot01_accelero.h"
 #include "stm32l4s5i_iot01.h"
 #include <string.h>
@@ -56,7 +57,42 @@ OSPI_HandleTypeDef hospi1;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+// Define application states
+typedef enum {
+  STATE_IDLE,           // Waiting for shake to begin
+  STATE_SHAKING,        // Currently detecting shaking
+  STATE_TEMPERATURE,    // Reading temperature for 5 seconds
+  STATE_VERIFY          // Verifying the readings
+} AppState;
 
+// Parameters for shake detection
+#define SHAKE_THRESHOLD     500    // Minimum acceleration change to qualify as shake (reduced from 8000)
+#define SHAKE_WINDOW_SIZE   10      // Number of samples to keep for shake detection
+#define MIN_SHAKE_COUNT     3       // Number of shakes needed to qualify as "true shake" (reduced from 5)
+#define TEMP_MEASURE_TIME   5000    // Temperature measurement time in ms
+
+// Variables for shake detection
+int16_t prev_acc[3] = {0, 0, 0};         // Previous accelerometer readings
+uint32_t shake_time_start = 0;           // When shaking started
+uint8_t shake_count = 0;                 // Counter for actual shakes
+uint32_t temp_reading_start = 0;         // When temperature reading started
+AppState current_state = STATE_IDLE;     // Current application state
+
+// Variables for temperature verification
+float temp_readings[5] = {0};            // Store multiple temperature readings
+uint8_t temp_reading_index = 0;          // Current temperature reading index
+
+// Kalman filter state for temperature readings
+struct kalman_state temp_kalman = {
+    .q = 0.01f,   // Process noise covariance
+    .r = 0.5f,    // Measurement noise covariance
+    .x = 25.0f,   // Initial estimate (room temperature)
+    .p = 1.0f,    // Initial error estimate
+    .k = 0.0f     // Initial Kalman gain
+};
+
+// For temperature change detection
+float baseline_temp = 0.0f;  // Baseline temperature
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,6 +107,12 @@ static void MX_USB_OTG_FS_USB_Init(void);
 static void MX_I2C2_Init(void);
 /* USER CODE BEGIN PFP */
 void change_channel(int i);
+bool detect_shake(int16_t* acc);
+void blink_led(uint32_t times, uint32_t delay_ms);
+void play_shake_detected_sound(void);
+void play_countdown_sound(uint32_t seconds_remaining);
+void play_success_sound(void);
+void update_state_machine(float current_temp);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -80,6 +122,266 @@ void change_channel(int i);
 #define TS_CAL2 ((uint16_t*)(uint32_t)0x1FFF75CA)
 #define TS_CAL1_TEMP ((float)30.0)
 #define TS_CAL2_TEMP ((float) 130.0)
+
+// Function to detect shaking motion
+bool detect_shake(int16_t* acc) {
+  // Calculate absolute differences from previous reading
+  int32_t delta_x = abs((int32_t)acc[0] - (int32_t)prev_acc[0]);
+  int32_t delta_y = abs((int32_t)acc[1] - (int32_t)prev_acc[1]);
+  int32_t delta_z = abs((int32_t)acc[2] - (int32_t)prev_acc[2]);
+
+//  // Debug every 500ms (controlled by external timer)
+//  static uint32_t last_debug = 0;
+//  uint32_t now = HAL_GetTick();
+//  if (now - last_debug > 500) {
+//    printf("Delta values: x=%ld, y=%ld, z=%ld (threshold: %d)\n",
+//           delta_x, delta_y, delta_z, SHAKE_THRESHOLD);
+//    last_debug = now;
+//  }
+
+  // Save current values as previous for next time
+  prev_acc[0] = acc[0];
+  prev_acc[1] = acc[1];
+  prev_acc[2] = acc[2];
+
+  // Look for rapid movement on at least one axis (changed from two axes)
+  int movement_axes = 0;
+  if (delta_x > SHAKE_THRESHOLD) movement_axes++;
+  if (delta_y > SHAKE_THRESHOLD) movement_axes++;
+  if (delta_z > SHAKE_THRESHOLD) movement_axes++;
+
+  return (movement_axes >= 1);  // True if significant movement on at least 1 axis (changed from 2)
+}
+
+// Function to blink LED for visual feedback
+void blink_led(uint32_t times, uint32_t delay_ms) {
+  for (uint32_t i = 0; i < times; i++) {
+    HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_SET);
+    HAL_Delay(delay_ms);
+    HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_RESET);
+    HAL_Delay(delay_ms);
+  }
+}
+
+// This function would be called for audio feedback when a shake is detected
+void play_shake_detected_sound() {
+  // TODO: Implement this using DAC
+  // This will involve generating a tone to indicate shake detection
+
+  // For now, just blink the LED to provide feedback
+  blink_led(3, 100);
+}
+
+// This function would be called for audio countdown during temperature reading
+void play_countdown_sound(uint32_t seconds_remaining) {
+  // TODO: Implement this using DAC
+  // This will involve generating a tone pattern indicating time remaining
+
+  // For now, just blink the LED to provide feedback
+  blink_led(1, 50);
+}
+
+// This function would be called for temperature reading success
+void play_success_sound() {
+  // TODO: Implement this using DAC
+  // This will involve generating a success tone pattern
+
+  // For now, just blink the LED to provide feedback
+  blink_led(5, 100);
+}
+
+// Function to process state machine
+void update_state_machine(float current_temp) {
+  uint32_t current_time = HAL_GetTick();
+
+  switch (current_state) {
+    case STATE_IDLE:
+      // In idle state, waiting for shake to be detected
+      HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_RESET);
+      break;
+
+    case STATE_SHAKING:
+      // Detecting continuous shaking
+      HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_SET);
+
+      // If user has been shaking for too long without qualifying, reset
+      if (current_time - shake_time_start > 3000 && shake_count < MIN_SHAKE_COUNT) {
+        current_state = STATE_IDLE;
+        shake_count = 0;
+        printf("Shake timeout - please try again\n");
+        blink_led(2, 200); // Error indication
+      }
+      // If enough shakes detected, move to temperature reading
+      else if (shake_count >= MIN_SHAKE_COUNT) {
+        current_state = STATE_TEMPERATURE;
+        temp_reading_start = current_time;
+        temp_reading_index = 0;
+        printf("Shake detected! Please place finger on temperature sensor\n");
+        play_shake_detected_sound(); // Audio feedback
+      }
+      break;
+
+    case STATE_TEMPERATURE:
+        // Reading temperature for 5 seconds
+        HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_SET);
+
+        uint32_t elapsed = current_time - temp_reading_start;
+        uint32_t seconds_remaining = (TEMP_MEASURE_TIME - elapsed) / 1000;
+
+        // Capture baseline temperature right at the start
+        if (temp_reading_index == 0) {
+            baseline_temp = current_temp;
+            printf("Baseline temperature: %.2f C\n", baseline_temp);
+        }
+
+        if (seconds_remaining < 5 && seconds_remaining >= 0) {
+            // Every second, update the countdown
+            static uint32_t last_second = 0;
+            if (last_second != seconds_remaining) {
+                last_second = seconds_remaining;
+                printf("Temperature reading: %d seconds remaining\n", (int)seconds_remaining + 1);
+                play_countdown_sound(seconds_remaining + 1);
+
+                // Store temperature reading
+                if (temp_reading_index < 5) {
+                    // Store the temperature value
+                    temp_readings[temp_reading_index++] = current_temp;
+                    printf("Current temperature: %.2f C (delta: %.2f C)\n",
+                           current_temp, current_temp - baseline_temp);
+                }
+            }
+        }
+
+        // When time is up, move to verification
+        if (elapsed >= TEMP_MEASURE_TIME) {
+            current_state = STATE_VERIFY;
+            printf("Temperature reading complete, verifying...\n");
+        }
+        break;
+
+    case STATE_VERIFY:
+        // Process the collected temperature data
+        float max_temp = -100.0f;
+        for (int i = 0; i < temp_reading_index; i++) {
+            if (temp_readings[i] > max_temp) {
+                max_temp = temp_readings[i];
+            }
+        }
+
+        float temp_change = max_temp - baseline_temp;
+        printf("Maximum temperature: %.2f C\n", max_temp);
+        printf("Temperature change: %.2f C\n", temp_change);
+
+        // Verify based on temperature change (warming from finger)
+        if (temp_change >= 1.0f) {
+            printf("Verification successful! Detected warming of %.2f C\n", temp_change);
+            play_success_sound();
+        } else {
+            printf("Verification failed - insufficient temperature change\n");
+            printf("Please place your finger near the board's temperature sensor\n");
+            blink_led(2, 200); // Error indication
+        }
+
+        // Return to idle state
+        current_state = STATE_IDLE;
+        HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_RESET);
+        break;
+  }
+}
+
+int _write(int file, char *ptr, int len)
+{
+    // Send each character via ITM
+    for (int i = 0; i < len; i++)
+    {
+        ITM_SendChar(*ptr++);
+    }
+    return len;
+}
+
+void change_channel(int i) {
+	ADC_ChannelConfTypeDef Config = {0};
+
+	if (i){
+		Config.Channel = ADC_CHANNEL_TEMPSENSOR;
+	}
+	else{
+		Config.Channel = ADC_CHANNEL_VREFINT;
+	}
+
+	Config.Rank = ADC_REGULAR_RANK_1,
+	Config.SamplingTime = ADC_SAMPLETIME_640CYCLES_5,
+	Config.SingleDiff = ADC_SINGLE_ENDED,
+	Config.OffsetNumber = ADC_OFFSET_NONE,
+	Config.Offset = 0;
+
+
+	if (HAL_ADC_ConfigChannel(&hadc1, &Config) != HAL_OK){
+		Error_Handler();
+	}
+}
+
+int KalmanFilterC(float* InputArray, float* OutputArray, struct kalman_state* kstate, int length) {
+    for (int i = 0; i < length; i++) { // Iterate
+        kstate->p = kstate->p + kstate->q;
+        kstate->k = kstate->p/(kstate->p + kstate->r);
+        kstate->x = kstate->x + (kstate->k)*(InputArray[i]-kstate->x);
+        kstate->p = (1-kstate->k)*kstate->p;
+        OutputArray[i] = kstate->x; // Store in output array
+        int a = __get_FPSCR();
+        if ((a & 268435456) != 0) { // Check for overflow (fixed parentheses)
+            printf("Overflow.");
+            while (1){}
+        }
+    }
+    return 0; // Return 0 if successful or get stuck in while loop
+}
+
+// Improved temperature reading function with Kalman filtering
+float read_temperature(void) {
+    float ADC_value;
+    float vref_plus;
+    float V_temp;
+    float temp_readings[5];
+    float filtered_temp;
+
+    // Take multiple readings for stability
+    for (int i = 0; i < 5; i++) {
+        // Measure the voltage ref+
+        change_channel(0);
+        HAL_ADC_Start(&hadc1);
+        HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+        ADC_value = (float)HAL_ADC_GetValue(&hadc1);
+        HAL_ADC_Stop(&hadc1);
+        vref_plus = 3.0f * (float)(*V_REFINT)/ADC_value;
+
+        // Small delay between readings
+        HAL_Delay(5);
+
+        // Measure temperature
+        change_channel(1);
+        HAL_ADC_Start(&hadc1);
+        HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+        V_temp = (float)HAL_ADC_GetValue(&hadc1);
+        HAL_ADC_Stop(&hadc1);
+
+        // Calculate temperature
+        temp_readings[i] = (((TS_CAL2_TEMP - TS_CAL1_TEMP)/((float)(*TS_CAL2) - (float)(*TS_CAL1))) *
+                          ((V_temp * vref_plus/3.0f)-(float)(*TS_CAL1))) + TS_CAL1_TEMP;
+
+        // Check for obviously wrong readings
+        if (temp_readings[i] < -10.0f || temp_readings[i] > 100.0f) {
+            temp_readings[i] = (i > 0) ? temp_readings[i-1] : 25.0f; // Use previous or default
+        }
+    }
+
+    // Apply Kalman filter to the readings
+    float filtered_readings[5];
+    KalmanFilterC(temp_readings, filtered_readings, &temp_kalman, 5);
+
+    // Return the last filtered value (most current)
+    return filtered_readings[4];
+}
 /* USER CODE END 0 */
 
 /**
@@ -120,18 +422,35 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USB_OTG_FS_USB_Init();
   MX_I2C2_Init();
+
   /* USER CODE BEGIN 2 */
   //BSP_TSENSOR_Init();
   //BSP_HSENSOR_Init(); //HTS221
   //BSP_MAGNETO_Init(); //LIS3MDL
+  // Initialize the accelerometer with default parameters (±2g range)
   BSP_ACCELERO_Init(); //LSM6DSL
+
+  // Set accelerometer to full scale - this may be required depending on your board
+  // The below is a placeholder - you might need to modify based on your specific board API
+  uint8_t ctrl = 0;
+  // Read current settings, modify only the scale bits, then write back
+  // This is just an example - you need to check your board's specific implementation
+  // BSP_ACCELERO_Set_FS(LSM6DSL_ACC_FULLSCALE_16G); // Set to ±16g for better sensitivity
   //BSP_GYRO_Init(); //LSM6DSL
   //BSP_PSENSOR_Init(); //LPS22HB
 
   float ADC_value;
   float vref_plus;
   float V_temp;
-  float temp;
+  float temp = 0;
+  int16_t acc[3] = {0};
+  uint32_t lastPrintTime = 0;
+
+  printf("\n\n--- Multi-factor Biometric Verification System ---\n");
+  printf("Shake the device firmly to begin verification\n");
+
+  // Blink LED to indicate system is ready
+  blink_led(2, 250);
 
   /* USER CODE END 2 */
 
@@ -142,27 +461,55 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		int16_t acc[3];
-		BSP_ACCELERO_AccGetXYZ(acc);
-		printf("accelerometer -> x: %d, y: %d, z: %d\n", acc[0], acc[1], acc[2]);
+    uint32_t currentTime = HAL_GetTick();
 
-		//Measure the voltage ref+ since need for temp and voltage
-		change_channel(0);
-		HAL_ADC_Start(&hadc1);
-		HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY); //Delay to ensure end of operation
-		ADC_value = (float)HAL_ADC_GetValue(&hadc1);
-		HAL_ADC_Stop(&hadc1);
-		vref_plus = 3.0f * (float)(*V_REFINT)/ADC_value;
+    // Read accelerometer data
+    BSP_ACCELERO_AccGetXYZ(acc);
 
-		change_channel(1);
-		HAL_ADC_Start(&hadc1);
-		HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY); //Delay to ensure end of operation
-		V_temp = (float)HAL_ADC_GetValue(&hadc1);
-		HAL_ADC_Stop(&hadc1);
-		temp = (((TS_CAL2_TEMP - TS_CAL1_TEMP)/((float)(*TS_CAL2) - (float)(*TS_CAL1))) * ((V_temp * vref_plus/3.0f)-(float)(*TS_CAL1))) + TS_CAL1_TEMP;
-		printf("Temp value: %f C \n", temp);
+    // Process accelerometer data for shake detection
+    if (current_state == STATE_IDLE) {
+      // In idle state, look for the start of shaking
+      if (detect_shake(acc)) {
+        // First shake detected, transition to shaking state
+        current_state = STATE_SHAKING;
+        shake_time_start = currentTime;
+        shake_count = 1;
+        printf("Possible shake detected, continue shaking...\n");
+      }
+    }
+    else if (current_state == STATE_SHAKING) {
+      // Already in shaking state, count additional shakes
+      if (detect_shake(acc)) {
+        shake_count++;
+        printf("Shake count: %d/%d\n", shake_count, MIN_SHAKE_COUNT);
+      }
+    }
 
-		HAL_Delay(1000);
+    // Always read temperature when in temperature reading state or for verification
+    // Always read temperature when in temperature reading state or for verification
+    if (current_state == STATE_TEMPERATURE || current_state == STATE_VERIFY) {
+        temp = read_temperature();
+    }
+
+    // For debugging in idle mode, print sensor values occasionally
+    if ((current_state == STATE_IDLE || current_state == STATE_SHAKING) &&
+        currentTime - lastPrintTime > 1000) {
+
+        // Read temperature with Kalman filtering for display
+        temp = read_temperature();
+
+        printf("Status: %s | Accelerometer: x=%d, y=%d, z=%d | Temp: %.2f C\n",
+               current_state == STATE_IDLE ? "IDLE" : "SHAKING",
+               acc[0], acc[1], acc[2], temp);
+
+        lastPrintTime = currentTime;
+    }
+
+    // Update the state machine with current temperature
+    update_state_machine(temp);
+
+    // Small delay to prevent CPU hogging
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
@@ -691,40 +1038,6 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
 }
-
-/* USER CODE BEGIN 4 */
-void change_channel (int i) {
-	ADC_ChannelConfTypeDef Config = {0};
-
-	if (i){
-		Config.Channel = ADC_CHANNEL_TEMPSENSOR;
-	}
-	else{
-		Config.Channel = ADC_CHANNEL_VREFINT;
-	}
-
-	Config.Rank = ADC_REGULAR_RANK_1,
-	Config.SamplingTime = ADC_SAMPLETIME_640CYCLES_5,
-	Config.SingleDiff = ADC_SINGLE_ENDED,
-	Config.OffsetNumber = ADC_OFFSET_NONE,
-	Config.Offset = 0;
-
-
-	if (HAL_ADC_ConfigChannel(&hadc1, &Config) != HAL_OK){
-		Error_Handler();
-	}
-}
-
-int _write(int file, char *ptr, int len)
-{
-    // Send each character via ITM
-    for (int i = 0; i < len; i++)
-    {
-        ITM_SendChar(*ptr++);
-    }
-    return len;
-}
-/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
