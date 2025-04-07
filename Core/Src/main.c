@@ -48,11 +48,16 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 
+DAC_HandleTypeDef hdac1;
+DMA_HandleTypeDef hdma_dac1_ch1;
+
 DFSDM_Channel_HandleTypeDef hdfsdm1_channel2;
 
 I2C_HandleTypeDef hi2c2;
 
 OSPI_HandleTypeDef hospi1;
+
+TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart1;
 
@@ -93,18 +98,43 @@ struct kalman_state temp_kalman = {
 
 // For temperature change detection
 float baseline_temp = 0.0f;  // Baseline temperature
+
+// DAC audio variables
+#define SINE_SAMPLES 32
+uint16_t sine_wave[SINE_SAMPLES] = {
+    2048, 2448, 2832, 3186, 3496, 3751, 3940, 4056,
+    4095, 4056, 3940, 3751, 3496, 3186, 2832, 2448,
+    2048, 1648, 1264, 910,  600,  345,  156,  40,
+    0,    40,   156,  345,  600,  910,  1264, 1648
+};
+
+// Sound frequencies in Hz
+#define NOTE_C4  262
+#define NOTE_D4  294
+#define NOTE_E4  330
+#define NOTE_F4  349
+#define NOTE_G4  392
+#define NOTE_A4  440
+#define NOTE_B4  494
+#define NOTE_C5  523
+
+// Audio status flag
+volatile uint8_t audio_playing = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_DFSDM1_Init(void);
 static void MX_OCTOSPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USB_OTG_FS_USB_Init(void);
 static void MX_I2C2_Init(void);
+static void MX_DAC1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 void change_channel(int i);
 bool detect_shake(int16_t* acc);
@@ -163,31 +193,108 @@ void blink_led(uint32_t times, uint32_t delay_ms) {
   }
 }
 
-// This function would be called for audio feedback when a shake is detected
-void play_shake_detected_sound() {
-  // TODO: Implement this using DAC
-  // This will involve generating a tone to indicate shake detection
+// Function to play a tone at a specific frequency for a duration
+void play_tone(uint16_t frequency, uint32_t duration_ms) {
+    // Stop any ongoing playback
+    if (audio_playing) {
+        HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+        audio_playing = 0;
+        HAL_Delay(5); // Small delay to ensure DMA stops
+    }
 
-  // For now, just blink the LED to provide feedback
-  blink_led(3, 100);
+    printf("Playing tone: %d Hz for %lu ms\n", frequency, duration_ms);
+
+    // Calculate timer period for the requested frequency
+    uint32_t timer_period = (SystemCoreClock / (frequency * SINE_SAMPLES));
+
+    // Configure Timer2 period
+    htim2.Instance->ARR = timer_period - 1;
+    htim2.Instance->PSC = 0; // No prescaler
+
+    // Start the timer
+    HAL_TIM_Base_Start(&htim2);
+
+    // Start DAC with DMA in circular mode to output the sine wave
+    audio_playing = 1;
+    HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1, (uint32_t*)sine_wave, SINE_SAMPLES, DAC_ALIGN_12B_R);
+
+    // Optional: if you need precise duration, use a timer or non-blocking delay
+    HAL_Delay(duration_ms);
+
+    // Stop the DAC and timer
+    HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+    HAL_TIM_Base_Stop(&htim2);
+    audio_playing = 0;
 }
 
-// This function would be called for audio countdown during temperature reading
+// Add a function to forcibly stop audio
+void stop_audio() {
+    if (audio_playing) {
+        HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+        HAL_TIM_Base_Stop(&htim2);
+        audio_playing = 0;
+    }
+}
+
+// This function is called for audio feedback when a shake is detected
+void play_shake_detected_sound(void) {
+    stop_audio();
+    // Rising tone pattern to indicate shake detection
+    play_tone(NOTE_C4, 100);
+    play_tone(NOTE_E4, 100);
+    play_tone(NOTE_G4, 100);
+    play_tone(NOTE_C5, 200);
+
+    // Still blink LED for visual feedback
+    blink_led(1, 50);
+    stop_audio();
+
+}
+
+// This function is called for audio countdown during temperature reading
 void play_countdown_sound(uint32_t seconds_remaining) {
-  // TODO: Implement this using DAC
-  // This will involve generating a tone pattern indicating time remaining
+    stop_audio();
+    // Different tones based on seconds remaining
+    switch(seconds_remaining) {
+        case 5:
+            play_tone(NOTE_C4, 100);
+            break;
+        case 4:
+            play_tone(NOTE_D4, 100);
+            break;
+        case 3:
+            play_tone(NOTE_E4, 100);
+            break;
+        case 2:
+            play_tone(NOTE_G4, 100);
+            break;
+        case 1:
+            play_tone(NOTE_A4, 100);
+            break;
+        default:
+            play_tone(NOTE_C4, 50);
+            break;
+    }
 
-  // For now, just blink the LED to provide feedback
-  blink_led(1, 50);
+    // Still blink LED for visual feedback
+    blink_led(1, 50);
+    stop_audio();
 }
 
-// This function would be called for temperature reading success
-void play_success_sound() {
-  // TODO: Implement this using DAC
-  // This will involve generating a success tone pattern
+// This function is called for temperature reading success
+void play_success_sound(void) {
+    stop_audio();
+    // Success melody
+    play_tone(NOTE_C4, 100);
+    play_tone(NOTE_E4, 100);
+    play_tone(NOTE_G4, 100);
+    play_tone(NOTE_C5, 200);
+    play_tone(NOTE_G4, 100);
+    play_tone(NOTE_C5, 300);
 
-  // For now, just blink the LED to provide feedback
-  blink_led(5, 100);
+    // Still blink LED for visual feedback
+    blink_led(1, 50);
+    stop_audio();
 }
 
 // Function to process state machine
@@ -198,6 +305,8 @@ void update_state_machine(float current_temp) {
     case STATE_IDLE:
       // In idle state, waiting for shake to be detected
       HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_RESET);
+      stop_audio();
+      shake_count = 0;
       break;
 
     case STATE_SHAKING:
@@ -217,6 +326,7 @@ void update_state_machine(float current_temp) {
         temp_reading_start = current_time;
         temp_reading_index = 0;
         printf("Shake detected! Please place finger on temperature sensor\n");
+        stop_audio();
         play_shake_detected_sound(); // Audio feedback
       }
       break;
@@ -282,6 +392,9 @@ void update_state_machine(float current_temp) {
             blink_led(2, 200); // Error indication
         }
 
+        stop_audio();
+        shake_count = 0;
+        temp_reading_index = 0;
         // Return to idle state
         current_state = STATE_IDLE;
         HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_RESET);
@@ -382,6 +495,17 @@ float read_temperature(void) {
     // Return the last filtered value (most current)
     return filtered_readings[4];
 }
+
+// DAC DMA error callback
+void HAL_DAC_DMAErrorCallback(DAC_HandleTypeDef *hdac) {
+    // Handle DMA errors
+    audio_playing = 0;
+    HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
+    HAL_TIM_Base_Stop(&htim2);
+
+    // Signal error with LED
+    blink_led(5, 50);
+}
 /* USER CODE END 0 */
 
 /**
@@ -416,19 +540,28 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_DFSDM1_Init();
   MX_OCTOSPI1_Init();
   MX_USART1_UART_Init();
   MX_USB_OTG_FS_USB_Init();
   MX_I2C2_Init();
-
+  MX_DAC1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   //BSP_TSENSOR_Init();
   //BSP_HSENSOR_Init(); //HTS221
   //BSP_MAGNETO_Init(); //LIS3MDL
   // Initialize the accelerometer with default parameters (±2g range)
   BSP_ACCELERO_Init(); //LSM6DSL
+
+  current_state = STATE_IDLE;  // Explicitly set initial state
+  shake_count = 0;             // Reset shake count
+  temp_reading_index = 0;      // Reset temperature reading index
+
+  // Initialize TIM2 for DAC triggering
+  HAL_TIM_Base_Stop(&htim2);
 
   // Set accelerometer to full scale - this may be required depending on your board
   // The below is a placeholder - you might need to modify based on your specific board API
@@ -612,7 +745,7 @@ static void MX_ADC1_Init(void)
 
   /* USER CODE END ADC1_Init 0 */
 
-  ADC_ChannelConfTypeDef Config = {0};
+  ADC_ChannelConfTypeDef sConfig = {0};
 
   /* USER CODE BEGIN ADC1_Init 1 */
 
@@ -642,19 +775,63 @@ static void MX_ADC1_Init(void)
 
   /** Configure Regular Channel
   */
-  Config.Channel = ADC_CHANNEL_TEMPSENSOR;
-  Config.Rank = ADC_REGULAR_RANK_1;
-  Config.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
-  Config.SingleDiff = ADC_SINGLE_ENDED;
-  Config.OffsetNumber = ADC_OFFSET_NONE;
-  Config.Offset = 0;
-  if (HAL_ADC_ConfigChannel(&hadc1, &Config) != HAL_OK)
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief DAC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_DAC1_Init(void)
+{
+
+  /* USER CODE BEGIN DAC1_Init 0 */
+
+  /* USER CODE END DAC1_Init 0 */
+
+  DAC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN DAC1_Init 1 */
+
+  /* USER CODE END DAC1_Init 1 */
+
+  /** DAC Initialization
+  */
+  hdac1.Instance = DAC1;
+  if (HAL_DAC_Init(&hdac1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** DAC channel OUT1 config
+  */
+  sConfig.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
+  sConfig.DAC_Trigger = DAC_TRIGGER_T2_TRGO;
+  sConfig.DAC_HighFrequency = DAC_HIGH_FREQUENCY_INTERFACE_MODE_ABOVE_80MHZ;
+  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  sConfig.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_DISABLE;
+  sConfig.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
+  if (HAL_DAC_ConfigChannel(&hdac1, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN DAC1_Init 2 */
+
+  /* USER CODE END DAC1_Init 2 */
 
 }
 
@@ -793,6 +970,51 @@ static void MX_OCTOSPI1_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 1000;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -862,6 +1084,23 @@ static void MX_USB_OTG_FS_USB_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMAMUX1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -884,8 +1123,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOE, ST25DV04K_RF_DISABLE_Pin|ISM43362_RST_Pin|ISM43362_SPI3_CSN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, ARD_D10_Pin|ARD_D4_Pin|ARD_D7_Pin|SPBTLE_RF_RST_Pin
-                          |ARD_D9_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, ARD_D10_Pin|ARD_D4_Pin|SPBTLE_RF_RST_Pin|ARD_D9_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, ARD_D8_Pin|ISM43362_BOOT0_Pin|ISM43362_WAKEUP_Pin|greenLed_Pin
@@ -926,10 +1164,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF8_UART4;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ARD_D10_Pin ARD_D4_Pin ARD_D7_Pin SPBTLE_RF_RST_Pin
-                           ARD_D9_Pin */
-  GPIO_InitStruct.Pin = ARD_D10_Pin|ARD_D4_Pin|ARD_D7_Pin|SPBTLE_RF_RST_Pin
-                          |ARD_D9_Pin;
+  /*Configure GPIO pins : ARD_D10_Pin ARD_D4_Pin SPBTLE_RF_RST_Pin ARD_D9_Pin */
+  GPIO_InitStruct.Pin = ARD_D10_Pin|ARD_D4_Pin|SPBTLE_RF_RST_Pin|ARD_D9_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1038,6 +1274,10 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
 }
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
