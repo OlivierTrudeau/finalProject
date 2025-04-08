@@ -413,6 +413,7 @@ void update_state_machine(float current_temp) {
         // Return to idle state
         current_state = STATE_IDLE;
         HAL_GPIO_WritePin(GPIOB, greenLed_Pin, GPIO_PIN_RESET);
+        BSP_ACCELERO_AccGetXYZ(prev_acc);
         break;
   }
 }
@@ -471,7 +472,6 @@ float read_temperature(void) {
     float vref_plus;
     float V_temp;
     float temp_readings[5];
-    float filtered_temp;
 
     // Take multiple readings for stability
     for (int i = 0; i < 5; i++) {
@@ -580,16 +580,12 @@ int main(void)
 
   // Set accelerometer to full scale - this may be required depending on your board
   // The below is a placeholder - you might need to modify based on your specific board API
-  uint8_t ctrl = 0;
   // Read current settings, modify only the scale bits, then write back
   // This is just an example - you need to check your board's specific implementation
   // BSP_ACCELERO_Set_FS(LSM6DSL_ACC_FULLSCALE_16G); // Set to ±16g for better sensitivity
   //BSP_GYRO_Init(); //LSM6DSL
   //BSP_PSENSOR_Init(); //LPS22HB
 
-  float ADC_value;
-  float vref_plus;
-  float V_temp;
   float temp = 0;
   int16_t acc[3] = {0};
   uint32_t lastPrintTime = 0;
@@ -599,6 +595,9 @@ int main(void)
 
   // Blink LED to indicate system is ready
   blink_led(2, 250);
+
+  // Perform a reading for a baseline
+  BSP_ACCELERO_AccGetXYZ(prev_acc);
 
   /* USER CODE END 2 */
 
