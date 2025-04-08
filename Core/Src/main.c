@@ -193,35 +193,38 @@ void blink_led(uint32_t times, uint32_t delay_ms) {
   }
 }
 
-// Function to play a tone at a specific frequency for a duration
 void play_tone(uint16_t frequency, uint32_t duration_ms) {
     // Stop any ongoing playback
     if (audio_playing) {
         HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
         audio_playing = 0;
-        HAL_Delay(5); // Small delay to ensure DMA stops
+        HAL_Delay(5); // Small delay
     }
-
     printf("Playing tone: %d Hz for %lu ms\n", frequency, duration_ms);
 
-    // Calculate timer period for the requested frequency
-    uint32_t timer_period = (SystemCoreClock / (frequency * SINE_SAMPLES));
+    // Calculate correct timer clock frequency.
+    uint32_t tim_clk = HAL_RCC_GetPCLK1Freq();
+    // If APB1 prescaler is not 1, the timer clock is doubled.
+    if ((RCC->CFGR & RCC_CFGR_PPRE1) != RCC_CFGR_PPRE1_DIV1) {
+        tim_clk *= 2;
+    }
 
-    // Configure Timer2 period
+    uint32_t timer_period = tim_clk / (frequency * SINE_SAMPLES);
     htim2.Instance->ARR = timer_period - 1;
-    htim2.Instance->PSC = 0; // No prescaler
+    htim2.Instance->PSC = 0;
 
-    // Start the timer
+    // Reset timer counter before starting
+    __HAL_TIM_SET_COUNTER(&htim2, 0);
+
+    // Start the timer and DAC DMA
     HAL_TIM_Base_Start(&htim2);
-
-    // Start DAC with DMA in circular mode to output the sine wave
     audio_playing = 1;
     HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1, (uint32_t*)sine_wave, SINE_SAMPLES, DAC_ALIGN_12B_R);
 
-    // Optional: if you need precise duration, use a timer or non-blocking delay
+    // Allow the tone to play for the duration specified
     HAL_Delay(duration_ms);
 
-    // Stop the DAC and timer
+    // Stop the DAC DMA and timer
     HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
     HAL_TIM_Base_Stop(&htim2);
     audio_playing = 0;
@@ -278,6 +281,7 @@ void play_countdown_sound(uint32_t seconds_remaining) {
 
     // Still blink LED for visual feedback
     blink_led(1, 50);
+    HAL_Delay(100);
     stop_audio();
 }
 
@@ -294,6 +298,7 @@ void play_success_sound(void) {
 
     // Still blink LED for visual feedback
     blink_led(1, 50);
+    HAL_Delay(100);
     stop_audio();
 }
 
@@ -372,19 +377,29 @@ void update_state_machine(float current_temp) {
     case STATE_VERIFY:
         // Process the collected temperature data
         float max_temp = -100.0f;
+        float min_temp = 100.0f;
         for (int i = 0; i < temp_reading_index; i++) {
             if (temp_readings[i] > max_temp) {
                 max_temp = temp_readings[i];
             }
+            else if (temp_readings[i] < min_temp){
+            	min_temp = temp_readings[i];
+            }
         }
 
-        float temp_change = max_temp - baseline_temp;
+        float top_temp_change = max_temp - baseline_temp;
+        float min_temp_change = min_temp - baseline_temp;
         printf("Maximum temperature: %.2f C\n", max_temp);
-        printf("Temperature change: %.2f C\n", temp_change);
+        printf("Minimum temperature: %.2f C\n", min_temp);
+        printf("Top temperature change: %.2f C\n", top_temp_change);
+        printf("Min temperature change: %.2f C\n", top_temp_change);
 
         // Verify based on temperature change (warming from finger)
-        if (temp_change >= 1.0f) {
-            printf("Verification successful! Detected warming of %.2f C\n", temp_change);
+        if (top_temp_change >= 1.0f) {
+            printf("Verification successful! Detected warming of %.2f C\n", top_temp_change);
+            play_success_sound();
+        } else if (min_temp_change <= -1.0f) {
+            printf("Verification successful! Detected cooling of %.2f C\n", min_temp_change);
             play_success_sound();
         } else {
             printf("Verification failed - insufficient temperature change\n");
