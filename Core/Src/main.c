@@ -74,7 +74,7 @@ typedef enum {
 #define SHAKE_THRESHOLD     500    // Minimum acceleration change to qualify as shake (reduced from 8000)
 #define SHAKE_WINDOW_SIZE   10      // Number of samples to keep for shake detection
 #define MIN_SHAKE_COUNT     3       // Number of shakes needed to qualify as "true shake" (reduced from 5)
-#define TEMP_MEASURE_TIME   5000    // Temperature measurement time in ms
+#define TEMP_MEASURE_TIME   10000    // Temperature measurement time in ms
 
 // Variables for shake detection
 int16_t prev_acc[3] = {0, 0, 0};         // Previous accelerometer readings
@@ -84,7 +84,7 @@ uint32_t temp_reading_start = 0;         // When temperature reading started
 AppState current_state = STATE_IDLE;     // Current application state
 
 // Variables for temperature verification
-float temp_readings[5] = {0};            // Store multiple temperature readings
+float temp_readings[10] = {0};            // Store multiple temperature readings
 uint8_t temp_reading_index = 0;          // Current temperature reading index
 
 // Kalman filter state for temperature readings
@@ -117,6 +117,14 @@ uint16_t sine_wave[SINE_SAMPLES] = {
 #define NOTE_A4  440
 #define NOTE_B4  494
 #define NOTE_C5  523
+
+// Additional definitions for octave 3 (one octave lower than C4)
+#define NOTE_C3  131
+#define NOTE_D3  147
+#define NOTE_E3  165
+#define NOTE_F3  175
+#define NOTE_G3  196
+
 
 // Audio status flag
 volatile uint8_t audio_playing = 0;
@@ -259,6 +267,21 @@ void play_countdown_sound(uint32_t seconds_remaining) {
     stop_audio();
     // Different tones based on seconds remaining
     switch(seconds_remaining) {
+        case 10:
+            play_tone(NOTE_C3, 100);
+            break;
+        case 9:
+            play_tone(NOTE_D3, 100);
+            break;
+        case 8:
+            play_tone(NOTE_E3, 100);
+            break;
+        case 7:
+            play_tone(NOTE_F3, 100);
+            break;
+        case 6:
+            play_tone(NOTE_G3, 100);
+            break;
         case 5:
             play_tone(NOTE_C4, 100);
             break;
@@ -299,6 +322,25 @@ void play_success_sound(void) {
     // Still blink LED for visual feedback
     blink_led(1, 50);
     HAL_Delay(100);
+    stop_audio();
+}
+
+// This function is called for temperature reading success
+void play_fail_sound(void) {
+    stop_audio();
+
+    // Failure melody: descending tones to indicate an error
+    play_tone(NOTE_C5, 100);
+    play_tone(NOTE_B4, 100);
+    play_tone(NOTE_A4, 100);
+    play_tone(NOTE_G4, 200);
+    play_tone(NOTE_F4, 200);
+    play_tone(NOTE_E4, 300);
+
+    // Blink LED for visual error indication
+    blink_led(2, 50);  // Blinks the LED twice with 50 ms per blink
+    HAL_Delay(100);
+
     stop_audio();
 }
 
@@ -349,7 +391,7 @@ void update_state_machine(float current_temp) {
             printf("Baseline temperature: %.2f C\n", baseline_temp);
         }
 
-        if (seconds_remaining < 5 && seconds_remaining >= 0) {
+        if (seconds_remaining < 10 && seconds_remaining >= 0) {
             // Every second, update the countdown
             static uint32_t last_second = 0;
             if (last_second != seconds_remaining) {
@@ -358,7 +400,7 @@ void update_state_machine(float current_temp) {
                 play_countdown_sound(seconds_remaining + 1);
 
                 // Store temperature reading
-                if (temp_reading_index < 5) {
+                if (temp_reading_index < 10) {
                     // Store the temperature value
                     temp_readings[temp_reading_index++] = current_temp;
                     printf("Current temperature: %.2f C (delta: %.2f C)\n",
@@ -390,21 +432,17 @@ void update_state_machine(float current_temp) {
         float top_temp_change = max_temp - baseline_temp;
         float min_temp_change = min_temp - baseline_temp;
         printf("Maximum temperature: %.2f C\n", max_temp);
-        printf("Minimum temperature: %.2f C\n", min_temp);
         printf("Top temperature change: %.2f C\n", top_temp_change);
-        printf("Min temperature change: %.2f C\n", top_temp_change);
 
         // Verify based on temperature change (warming from finger)
-        if (top_temp_change >= 1.0f) {
+        if (top_temp_change >= 0.6f) {
             printf("Verification successful! Detected warming of %.2f C\n", top_temp_change);
-            play_success_sound();
-        } else if (min_temp_change <= -1.0f) {
-            printf("Verification successful! Detected cooling of %.2f C\n", min_temp_change);
             play_success_sound();
         } else {
             printf("Verification failed - insufficient temperature change\n");
             printf("Please place your finger near the board's temperature sensor\n");
             blink_led(2, 200); // Error indication
+            play_fail_sound();
         }
 
         stop_audio();
@@ -471,10 +509,10 @@ float read_temperature(void) {
     float ADC_value;
     float vref_plus;
     float V_temp;
-    float temp_readings[5];
+    float temp_readings[10];
 
     // Take multiple readings for stability
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 10; i++) {
         // Measure the voltage ref+
         change_channel(0);
         HAL_ADC_Start(&hadc1);
@@ -504,8 +542,8 @@ float read_temperature(void) {
     }
 
     // Apply Kalman filter to the readings
-    float filtered_readings[5];
-    KalmanFilterC(temp_readings, filtered_readings, &temp_kalman, 5);
+    float filtered_readings[10];
+    KalmanFilterC(temp_readings, filtered_readings, &temp_kalman, 10);
 
     // Return the last filtered value (most current)
     return filtered_readings[4];
